@@ -300,6 +300,14 @@ generated: components: sinks: aws_s3: configuration: {
 
 						[apache_parquet]: https://parquet.apache.org/
 						"""
+					proto_batch: """
+						Encodes each event individually as a [Protocol Buffers][protobuf] message.
+
+						Each event in the batch is serialized to protobuf bytes independently,
+						producing a list of byte buffers (one per event).
+
+						[protobuf]: https://protobuf.dev/
+						"""
 				}
 			}
 			compression: {

@@ -116,6 +116,9 @@ pub struct S3SinkConfig {
     /// its own internal compression, so the top-level `compression` setting is bypassed.
     ///
     /// Only the `parquet` codec is supported by the AWS S3 sink.
+    // The schema exposes every `BatchSerializerConfig` variant (arrow_stream,
+    // parquet, proto_batch) because of the shared type; non-Parquet variants are
+    // rejected at config-build time.
     #[cfg(feature = "codecs-parquet")]
     #[configurable(derived)]
     #[serde(default)]
