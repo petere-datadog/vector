@@ -451,5 +451,4 @@ mod tests {
 
         assert_eq!(settings.size_limit, 10_000_000);
     }
-
 }
