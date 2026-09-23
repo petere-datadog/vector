@@ -10,6 +10,7 @@ use http_1::{Request, Response, Uri};
 use http_body_util::BodyExt;
 use tower::Service;
 #[cfg(any(
+    feature = "sinks-azure_data_explorer",
     feature = "sinks-gcp",
     feature = "sinks-greptimedb_logs",
     feature = "sinks-honeycomb",
@@ -30,6 +31,13 @@ use crate::{
 };
 
 /// Builds a native `http 1` request from a buffered HTTP sink request.
+#[cfg(any(
+    feature = "sinks-clickhouse",
+    feature = "sinks-gcp",
+    feature = "sinks-greptimedb_logs",
+    feature = "sinks-honeycomb",
+    feature = "sinks-keep",
+))]
 pub(crate) trait HttpServiceRequestBuilder<T: Send> {
     fn build(&self, request: HttpRequest<T>) -> Result<Request<Bytes>, crate::Error>;
 }
@@ -73,6 +81,13 @@ impl DriverResponse for HttpResponse {
 }
 
 /// Native `http 1` equivalent of the legacy `HttpService`.
+#[cfg(any(
+    feature = "sinks-clickhouse",
+    feature = "sinks-gcp",
+    feature = "sinks-greptimedb_logs",
+    feature = "sinks-honeycomb",
+    feature = "sinks-keep",
+))]
 #[derive(Clone)]
 pub(crate) struct HttpService<B, T: Send> {
     client: HttpClient,
@@ -80,6 +95,13 @@ pub(crate) struct HttpService<B, T: Send> {
     _phantom: PhantomData<fn() -> T>,
 }
 
+#[cfg(any(
+    feature = "sinks-clickhouse",
+    feature = "sinks-gcp",
+    feature = "sinks-greptimedb_logs",
+    feature = "sinks-honeycomb",
+    feature = "sinks-keep",
+))]
 impl<B, T> HttpService<B, T>
 where
     B: HttpServiceRequestBuilder<T> + Send + Sync + 'static,
@@ -94,6 +116,13 @@ where
     }
 }
 
+#[cfg(any(
+    feature = "sinks-clickhouse",
+    feature = "sinks-gcp",
+    feature = "sinks-greptimedb_logs",
+    feature = "sinks-honeycomb",
+    feature = "sinks-keep",
+))]
 impl<B, T> Service<HttpRequest<T>> for HttpService<B, T>
 where
     B: HttpServiceRequestBuilder<T> + Send + Sync + 'static,
@@ -146,6 +175,7 @@ where
 
 // Clickhouse implements its own retry logic, so this is only used by the sinks below.
 #[cfg(any(
+    feature = "sinks-azure_data_explorer",
     feature = "sinks-gcp",
     feature = "sinks-greptimedb_logs",
     feature = "sinks-honeycomb",
@@ -180,6 +210,99 @@ pub(crate) fn http_response_retry_logic<Request: Clone + Send + Sync + 'static>(
         },
         retry_strategy,
     )
+}
+
+/// Async variant of [`HttpServiceRequestBuilder`], for sinks whose request
+/// construction must `await`.
+///
+/// The synchronous trait cannot express this: acquiring an OAuth token through
+/// `azure_core`/`azure_identity`, for example, is async even on a cache hit, and
+/// there is no way to block on it from a sync fn without stalling a runtime
+/// worker. Implement this trait and use [`AsyncHttpService`] instead.
+#[cfg(feature = "sinks-azure_data_explorer")]
+#[async_trait::async_trait]
+pub(crate) trait AsyncHttpServiceRequestBuilder<T: Send> {
+    async fn build(&self, request: HttpRequest<T>) -> Result<Request<Bytes>, crate::Error>;
+}
+
+/// [`HttpService`] for request builders that need to `await`.
+///
+/// Behaves identically to [`HttpService`] in every other respect, including the
+/// error type and the [`HttpResponse`] it produces, so the same retry logic
+/// applies to both.
+#[cfg(feature = "sinks-azure_data_explorer")]
+#[derive(Clone)]
+pub(crate) struct AsyncHttpService<B, T: Send> {
+    client: HttpClient,
+    request_builder: Arc<B>,
+    _phantom: PhantomData<fn() -> T>,
+}
+
+#[cfg(feature = "sinks-azure_data_explorer")]
+impl<B, T> AsyncHttpService<B, T>
+where
+    B: AsyncHttpServiceRequestBuilder<T> + Send + Sync + 'static,
+    T: Send + 'static,
+{
+    pub(crate) fn new(client: HttpClient, request_builder: B) -> Self {
+        Self {
+            client,
+            request_builder: Arc::new(request_builder),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+#[cfg(feature = "sinks-azure_data_explorer")]
+impl<B, T> Service<HttpRequest<T>> for AsyncHttpService<B, T>
+where
+    B: AsyncHttpServiceRequestBuilder<T> + Send + Sync + 'static,
+    T: Send + 'static,
+{
+    type Response = HttpResponse;
+    type Error = HttpError;
+    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, mut request: HttpRequest<T>) -> Self::Future {
+        let request_builder = Arc::clone(&self.request_builder);
+        let client = self.client.clone();
+        let metadata = std::mem::take(request.metadata_mut());
+        let raw_byte_size = metadata.request_encoded_size();
+        let events_byte_size = metadata.into_events_estimated_json_encoded_byte_size();
+
+        Box::pin(async move {
+            let request = request_builder
+                .build(request)
+                .await
+                .inspect_err(|error| {
+                    emit!(SinkRequestBuildError { error });
+                })
+                .map_err(HttpError::from)?;
+            let byte_size = request.body().len();
+            let (protocol, endpoint) = protocol_endpoint(request.uri());
+            let response = client.send(request.map(full_body)).await?;
+
+            if response.status().is_success() {
+                emit!(EndpointBytesSent {
+                    byte_size,
+                    protocol: &protocol,
+                    endpoint: &endpoint,
+                });
+            }
+
+            let (parts, body) = response.into_parts();
+            let body = body.collect().await.map_err(HttpError::new)?.to_bytes();
+            Ok(HttpResponse {
+                http_response: Response::from_parts(parts, body),
+                events_byte_size,
+                raw_byte_size,
+            })
+        })
+    }
 }
 
 fn protocol_endpoint(uri: &Uri) -> (String, String) {

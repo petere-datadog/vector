@@ -12,6 +12,7 @@ pub mod http;
 #[cfg(any(
     feature = "sinks-clickhouse",
     feature = "sinks-gcp",
+    feature = "sinks-azure_data_explorer",
     feature = "sinks-greptimedb_logs",
     feature = "sinks-honeycomb",
     feature = "sinks-keep",
